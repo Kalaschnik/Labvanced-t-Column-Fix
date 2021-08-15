@@ -19,11 +19,13 @@ fix_labvanced_t_column <- function(df, dev_mode = FALSE) {
   source("sort_t_within_chunks.R")
 
   # For easy string interpolation
-  if (!require(stringr))
-    install.packages('stringr')
+  if (!require(stringr)) install.packages('stringr')
   library(stringr)
 
-  # browser()
+  # for solitary value treatment (lag and lead)
+  if (!require(dplyr)) install.packages('dplyr')
+  library(dplyr)
+
 
   # check if there is a "t" and a "times" column
   if (!"t" %in% colnames(df) &&
@@ -44,8 +46,7 @@ fix_labvanced_t_column <- function(df, dev_mode = FALSE) {
     df$times_t <- df$times - df$t
   }
   # show overview
-  if (dev_mode)
-    summary(df$times_t)
+  if (dev_mode) summary(df$times_t)
 
   median_delay <- round(median(df$times - df$t, na.rm = TRUE))
 
@@ -55,8 +56,7 @@ fix_labvanced_t_column <- function(df, dev_mode = FALSE) {
 
 
   # Check if Task_Nr is now be in order
-  if (is.unsorted(df$Task_Nr))
-    stop("Task_Nr is not sorted, this should no happen!")
+  if (is.unsorted(df$Task_Nr)) stop("Task_Nr is not sorted, this should no happen!")
 
 
   # check if first and last value of t is NA. If so subtract median delay ...
@@ -101,10 +101,73 @@ fix_labvanced_t_column <- function(df, dev_mode = FALSE) {
   df <- sort_t_within_chunks(df, data_ranges)
 
 
-  # sanitize check
-  # check if t is already sorted after sort_t_within_chunks, this is likely the case...
-  # yet, it can happen that some rows
+  # if everything is already in order by t, we are good if not we need to check solitary values
+  needs_solitary_sort <- is.unsorted(df$t, na.rm = TRUE)
+  if (needs_solitary_sort) {
 
+    # check for single values surrounded by NAs/NaNs
+    # those solitary values are not part of data_ranges and may fuck-up the ordering
+    # we need to check if they are in place
+    solitary_ts <- df$t[!is.na(df$t) & is.na(lag(df$t, default = 1)) & is.na(lead(df$t, default = 1))]
+    solitary_ts_indexes <- which(df$t %in% solitary_ts)
+
+    for (i in seq_along(solitary_ts_indexes)) {
+
+      # CHECK CHUNK BEFORE
+
+      # get index of the last t value in the former chunk
+      former_chunk_last_t_index <-
+        data_ranges$end_ranges[max(which(data_ranges$end_ranges < solitary_ts_indexes[i]))]
+
+      # compare timestamp of former chunk last t with currrent solitary value
+      if (df$t[former_chunk_last_t_index] > solitary_ts[i]) {
+
+        # get former chunk start range
+        former_chunk_first_t_index <-
+          data_ranges$start_ranges[max(which(data_ranges$start_ranges < solitary_ts_indexes[i]))]
+
+
+        # sanity check if solitary value is even smaller then former start range
+        if (solitary_ts[i] < df$t[former_chunk_first_t_index]) stop("Hope this never happens...")
+
+        # swap solitary_ts with former chunk last index
+        bucket <- df[solitary_ts_indexes[i],]
+        df[solitary_ts_indexes[i],] <- df[former_chunk_last_t_index,]
+        df[former_chunk_last_t_index,] <- bucket
+      }
+
+      # CHECK CHUNK AFTER
+
+      # get index of the first t value in the later chunk
+      later_chunk_first_t_index <-
+        data_ranges$start_ranges[min(which(data_ranges$start_ranges > solitary_ts_indexes[i]))]
+
+      # compare timestamp of later chunk first t with currrent solitary value
+      if (df$t[later_chunk_first_t_index] < solitary_ts[i]) {
+
+        # get later chunk end range
+        later_chunk_last_t_index <-
+          data_ranges$end_ranges[min(which(data_ranges$end_ranges > solitary_ts_indexes[i]))]
+
+
+        # sanity check if solitary value is even smaller then former start range
+        if (solitary_ts[i] > df$t[later_chunk_last_t_index]) stop("Hope this never happens...")
+
+        # swap solitary_ts with later chunk first index
+        bucket <- df[solitary_ts_indexes[i],]
+        df[solitary_ts_indexes[i],] <- df[later_chunk_first_t_index,]
+        df[later_chunk_first_t_index,] <- bucket
+      }
+    }
+  }
+
+  # perform inner sorting (chunk-wise) again
+  df <- sort_t_within_chunks(df, data_ranges)
+
+
+
+  # check if t is already sorted after sort_t_within_chunks, and solitary sort,
+  # this is likely the case...yet, it can happen that some rows with multiple values are affected
   needs_bubble_sort <- is.unsorted(df$t, na.rm = TRUE)
 
   if (needs_bubble_sort) {
@@ -113,7 +176,7 @@ fix_labvanced_t_column <- function(df, dev_mode = FALSE) {
     while (needs_bubble_sort) {
       # check which indexes cause unsorted
       for (i in 2:length(data_ranges$start_ranges) - 1) {
-        # if (i == 64) browser()
+        # if (i == 108) browser()
         former_end_index <- data_ranges$end_ranges[i]
         next_start_index <- data_ranges$start_ranges[i + 1]
 
@@ -145,7 +208,12 @@ fix_labvanced_t_column <- function(df, dev_mode = FALSE) {
 
           if (needs_bubble_sort) {
             # perform inner sorting first before another bubble sort
-            df <- sort_t_within_chunks(df)
+            df <- sort_t_within_chunks(df, data_ranges)
+            # check if we are good now?
+            needs_bubble_sort <- is.unsorted(df$t, na.rm = TRUE)
+            # # redo current index
+            # i <- i - 1
+
           }
         }
       }
